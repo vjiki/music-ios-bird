@@ -18,6 +18,7 @@ protocol AudioPlayerServiceProtocol {
     func pause()
     func seek(to time: TimeInterval)
     func load(url: URL, title: String?, artist: String?, coverURL: String?)
+    func preloadNext(url: URL)
     func stop()
     
     var onTimeUpdate: ((TimeInterval) -> Void)? { get set }
@@ -31,6 +32,7 @@ class AudioPlayerService: AudioPlayerServiceProtocol {
     private var player: AVPlayer?
     private var timeObserverToken: Any?
     private var playbackFinishedObserver: Any?
+    private var nextPlayerItem: AVPlayerItem?
     
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
@@ -72,22 +74,39 @@ class AudioPlayerService: AudioPlayerServiceProtocol {
     func load(url: URL, title: String? = nil, artist: String? = nil, coverURL: String? = nil) {
         cleanup()
         
-        // Check cache first
-        let cacheService = CacheService.shared
+        // Check if URL is an m3u8 (HLS streaming) file
+        let isM3U8 = isM3U8URL(url)
         let finalURL: URL
         
-        if let cachedURL = cacheService.getCachedAudioURL(url: url) {
-            finalURL = cachedURL
-        } else {
+        if isM3U8 {
+            // For m3u8 files, use the original URL directly (no caching)
+            // AVPlayer natively supports HLS streaming
             finalURL = url
-            // Cache audio in background with metadata
-            Task {
-                await cacheAudio(url: url, title: title, artist: artist, coverURL: coverURL)
+        } else {
+            // For regular audio files, check cache first
+            let cacheService = CacheService.shared
+            
+            if let cachedURL = cacheService.getCachedAudioURL(url: url) {
+                finalURL = cachedURL
+            } else {
+                finalURL = url
+                // Cache audio in background with metadata
+                Task {
+                    await cacheAudio(url: url, title: title, artist: artist, coverURL: coverURL)
+                }
             }
         }
         
         let playerItem = AVPlayerItem(url: finalURL)
+        
+        // Configure for better buffering
+        playerItem.preferredForwardBufferDuration = 30.0
         player = AVPlayer(playerItem: playerItem)
+        
+        // Configure player to minimize stalling
+        if let player = player {
+            player.automaticallyWaitsToMinimizeStalling = true
+        }
         
         addPlaybackObservers(for: playerItem)
         addPeriodicTimeObserver()
@@ -96,7 +115,53 @@ class AudioPlayerService: AudioPlayerServiceProtocol {
         duration = 0
     }
     
+    func preloadNext(url: URL) {
+        // Clear previous preloaded item
+        nextPlayerItem = nil
+        
+        // Check if URL is an m3u8 (HLS streaming) file
+        let isM3U8 = isM3U8URL(url)
+        let finalURL: URL
+        
+        if isM3U8 {
+            // For m3u8 files, use the original URL directly (no caching)
+            finalURL = url
+        } else {
+            // For regular audio files, check cache first
+            let cacheService = CacheService.shared
+            
+            if let cachedURL = cacheService.getCachedAudioURL(url: url) {
+                finalURL = cachedURL
+            } else {
+                finalURL = url
+            }
+        }
+        
+        // Create and preload the next item
+        let nextItem = AVPlayerItem(url: finalURL)
+        nextItem.preferredForwardBufferDuration = 30.0
+        
+        // Preload the asset
+        let asset = nextItem.asset
+        asset.loadValuesAsynchronously(forKeys: ["playable", "duration"]) {
+            // Item is preloaded and ready
+        }
+        
+        nextPlayerItem = nextItem
+    }
+    
+    /// Checks if a URL points to an m3u8 (HLS) playlist file
+    private func isM3U8URL(_ url: URL) -> Bool {
+        let urlString = url.absoluteString.lowercased()
+        return urlString.hasSuffix(".m3u8") || urlString.contains(".m3u8?") || urlString.contains(".m3u8#")
+    }
+    
     private func cacheAudio(url: URL, title: String?, artist: String?, coverURL: String?) async {
+        // Skip caching for m3u8 files (HLS streaming)
+        if isM3U8URL(url) {
+            return
+        }
+        
         let cacheService = CacheService.shared
         
         // Skip if already cached
@@ -172,6 +237,8 @@ class AudioPlayerService: AudioPlayerServiceProtocol {
             NotificationCenter.default.removeObserver(playbackFinishedObserver)
         }
         playbackFinishedObserver = nil
+        
+        nextPlayerItem = nil
         
         player?.pause()
         player = nil

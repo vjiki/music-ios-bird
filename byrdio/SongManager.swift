@@ -442,6 +442,25 @@ class SongManager: ObservableObject {
         audioPlayer.load(url: url, title: currentSong.title, artist: currentSong.artist, coverURL: currentSong.cover)
         audioPlayer.play()
         updateNowPlayingInfo()
+        
+        // Preload next song
+        preloadNextSong()
+    }
+    
+    private func preloadNextSong() {
+        // Get next song index
+        guard let nextIndex = playlistManager.getNextIndex(),
+              nextIndex < playlistManager.currentPlaylist.count else {
+            return
+        }
+        
+        let nextSong = playlistManager.currentPlaylist[nextIndex]
+        guard let nextURL = URL(string: nextSong.audio_url), !nextSong.audio_url.isEmpty else {
+            return
+        }
+        
+        // Preload next song
+        audioPlayer.preloadNext(url: nextURL)
     }
     
     private func resumeLastSongIfPossible() {

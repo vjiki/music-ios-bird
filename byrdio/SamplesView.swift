@@ -16,6 +16,7 @@ class SamplesPlayer: NSObject, ObservableObject {
     private var playbackFinishedObserver: Any?
     private var playerLayer: AVPlayerLayer?
     private var hasStatusObserver: Bool = false
+    private var nextPlayerItem: AVPlayerItem?
     
     @Published var currentShort: ShortsModel?
     @Published var isPlaying: Bool = false
@@ -107,7 +108,8 @@ class SamplesPlayer: NSObject, ObservableObject {
             return
         }
         
-        // Check cache first
+        // Check if URL is an m3u8 (HLS streaming) file
+        let isM3U8 = isM3U8URL(url)
         let cacheService = CacheService.shared
         let finalURL: URL
         
@@ -116,13 +118,18 @@ class SamplesPlayer: NSObject, ObservableObject {
                 finalURL = cachedURL
             } else {
                 finalURL = url
-                // Cache video in background
-                Task {
-                    await cacheVideo(url: url, short: short)
+                // Cache video in background (skip for m3u8)
+                if !isM3U8 {
+                    Task {
+                        await cacheVideo(url: url, short: short)
+                    }
                 }
             }
         } else {
-            if let cachedURL = cacheService.getCachedAudioURL(url: url) {
+            if isM3U8 {
+                // For m3u8 files, use the original URL directly (no caching)
+                finalURL = url
+            } else if let cachedURL = cacheService.getCachedAudioURL(url: url) {
                 finalURL = cachedURL
             } else {
                 finalURL = url
@@ -134,7 +141,15 @@ class SamplesPlayer: NSObject, ObservableObject {
         }
         
         let playerItem = AVPlayerItem(url: finalURL)
+        
+        // Configure for better buffering
+        playerItem.preferredForwardBufferDuration = 30.0
         player = AVPlayer(playerItem: playerItem)
+        
+        // Configure player to minimize stalling
+        if let player = player {
+            player.automaticallyWaitsToMinimizeStalling = true
+        }
         
         // Configure player for video - loop playback
         if short.type == "SHORT_VIDEO" {
@@ -173,7 +188,80 @@ class SamplesPlayer: NSObject, ObservableObject {
         duration = 0
     }
     
+    func preloadNextShort(currentIndex: Int, shorts: [ShortsModel]) {
+        // Get next short index
+        let nextIndex = currentIndex + 1
+        guard nextIndex < shorts.count else {
+            return
+        }
+        
+        let nextShort = shorts[nextIndex]
+        let urlString: String?
+        if nextShort.type == "SHORT_VIDEO", let videoUrl = nextShort.video_url, !videoUrl.isEmpty {
+            urlString = videoUrl
+        } else if let audioUrl = nextShort.audio_url, !audioUrl.isEmpty {
+            urlString = audioUrl
+        } else {
+            return
+        }
+        
+        guard let urlString = urlString, let url = URL(string: urlString) else {
+            return
+        }
+        
+        // Preload next short
+        preloadNext(url: url, isVideo: nextShort.type == "SHORT_VIDEO")
+    }
+    
+    private func preloadNext(url: URL, isVideo: Bool) {
+        // Clear previous preloaded item
+        nextPlayerItem = nil
+        
+        // Check if URL is an m3u8 (HLS streaming) file
+        let isM3U8 = isM3U8URL(url)
+        let finalURL: URL
+        
+        if isM3U8 {
+            // For m3u8 files, use the original URL directly (no caching)
+            finalURL = url
+        } else {
+            // For regular files, check cache first
+            let cacheService = CacheService.shared
+            
+            if isVideo {
+                if let cachedURL = cacheService.getCachedVideoURL(url: url) {
+                    finalURL = cachedURL
+                } else {
+                    finalURL = url
+                }
+            } else {
+                if let cachedURL = cacheService.getCachedAudioURL(url: url) {
+                    finalURL = cachedURL
+                } else {
+                    finalURL = url
+                }
+            }
+        }
+        
+        // Create and preload the next item
+        let nextItem = AVPlayerItem(url: finalURL)
+        nextItem.preferredForwardBufferDuration = 30.0
+        
+        // Preload the asset
+        let asset = nextItem.asset
+        asset.loadValuesAsynchronously(forKeys: ["playable", "duration"]) {
+            // Item is preloaded and ready
+        }
+        
+        nextPlayerItem = nextItem
+    }
+    
     private func cacheAudio(url: URL, short: ShortsModel) async {
+        // Skip caching for m3u8 files (HLS streaming)
+        if isM3U8URL(url) {
+            return
+        }
+        
         let cacheService = CacheService.shared
         if cacheService.hasCachedAudio(url: url) { return }
         
@@ -183,6 +271,12 @@ class SamplesPlayer: NSObject, ObservableObject {
         } catch {
             print("Failed to cache audio: \(error.localizedDescription)")
         }
+    }
+    
+    /// Checks if a URL points to an m3u8 (HLS) playlist file
+    private func isM3U8URL(_ url: URL) -> Bool {
+        let urlString = url.absoluteString.lowercased()
+        return urlString.hasSuffix(".m3u8") || urlString.contains(".m3u8?") || urlString.contains(".m3u8#")
     }
     
     private func cacheVideo(url: URL, short: ShortsModel) async {
@@ -228,6 +322,7 @@ class SamplesPlayer: NSObject, ObservableObject {
             }
         }
         currentPlayerItem = nil
+        nextPlayerItem = nil
         
         player?.pause()
         player = nil
@@ -455,6 +550,9 @@ struct SamplesView: View {
         if short.type != "SHORT_VIDEO" {
             samplesPlayer.play()
         }
+        
+        // Preload next short
+        samplesPlayer.preloadNextShort(currentIndex: index, shorts: shorts)
     }
     
     // MARK: - Like/Dislike Methods

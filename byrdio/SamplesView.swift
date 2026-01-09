@@ -114,15 +114,16 @@ class SamplesPlayer: NSObject, ObservableObject {
         let finalURL: URL
         
         if short.type == "SHORT_VIDEO" {
-            if let cachedURL = cacheService.getCachedVideoURL(url: url) {
+            if isM3U8 {
+                // For m3u8 video files, use the original URL directly (no caching)
+                finalURL = url
+            } else if let cachedURL = cacheService.getCachedVideoURL(url: url) {
                 finalURL = cachedURL
             } else {
                 finalURL = url
                 // Cache video in background (skip for m3u8)
-                if !isM3U8 {
-                    Task {
-                        await cacheVideo(url: url, short: short)
-                    }
+                Task {
+                    await cacheVideo(url: url, short: short)
                 }
             }
         } else {
@@ -142,13 +143,20 @@ class SamplesPlayer: NSObject, ObservableObject {
         
         let playerItem = AVPlayerItem(url: finalURL)
         
-        // Configure for better buffering
-        playerItem.preferredForwardBufferDuration = 30.0
+        // Configure buffering based on format
+        // For m3u8 (HLS) - don't use preferredForwardBufferDuration for instant swipe
+        // For regular files - use buffering for smoother playback
+        if !isM3U8 {
+            playerItem.preferredForwardBufferDuration = 30.0
+        }
+        
         player = AVPlayer(playerItem: playerItem)
         
         // Configure player to minimize stalling
+        // For m3u8 (HLS) - set to false for instant swipe
+        // For regular files - set to true for smoother playback
         if let player = player {
-            player.automaticallyWaitsToMinimizeStalling = true
+            player.automaticallyWaitsToMinimizeStalling = !isM3U8
         }
         
         // Configure player for video - loop playback
@@ -245,7 +253,12 @@ class SamplesPlayer: NSObject, ObservableObject {
         
         // Create and preload the next item
         let nextItem = AVPlayerItem(url: finalURL)
-        nextItem.preferredForwardBufferDuration = 30.0
+        
+        // For m3u8 (HLS) - don't use preferredForwardBufferDuration for instant swipe
+        // For regular files - use buffering for smoother playback
+        if !isM3U8 {
+            nextItem.preferredForwardBufferDuration = 30.0
+        }
         
         // Preload the asset
         let asset = nextItem.asset
@@ -280,6 +293,11 @@ class SamplesPlayer: NSObject, ObservableObject {
     }
     
     private func cacheVideo(url: URL, short: ShortsModel) async {
+        // Skip caching for m3u8 files (HLS streaming)
+        if isM3U8URL(url) {
+            return
+        }
+        
         let cacheService = CacheService.shared
         if cacheService.hasCachedVideo(url: url) { return }
         

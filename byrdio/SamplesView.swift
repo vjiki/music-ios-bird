@@ -17,6 +17,7 @@ class SamplesPlayer: NSObject, ObservableObject {
     private var playerLayer: AVPlayerLayer?
     private var hasStatusObserver: Bool = false
     private var nextPlayerItem: AVPlayerItem?
+    private var currentURL: URL?
     
     @Published var currentShort: ShortsModel?
     @Published var isPlaying: Bool = false
@@ -108,6 +109,9 @@ class SamplesPlayer: NSObject, ObservableObject {
             return
         }
         
+        // Store current URL for later reference
+        currentURL = url
+        
         // Check if URL is an m3u8 (HLS streaming) file
         let isM3U8 = isM3U8URL(url)
         let cacheService = CacheService.shared
@@ -186,8 +190,9 @@ class SamplesPlayer: NSObject, ObservableObject {
         addPlaybackObservers(for: playerItem)
         addPeriodicTimeObserver()
         
-        // Observe player item status for video
-        if short.type == "SHORT_VIDEO" {
+        // Observe player item status for video and m3u8 audio
+        // For m3u8 audio, we need to wait for ready status before playing
+        if short.type == "SHORT_VIDEO" || (short.type != "SHORT_VIDEO" && isM3U8) {
             playerItem.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
             hasStatusObserver = true
         }
@@ -259,6 +264,7 @@ class SamplesPlayer: NSObject, ObservableObject {
         if !isM3U8 {
             nextItem.preferredForwardBufferDuration = 30.0
         }
+        // Note: For m3u8, we don't set preferredForwardBufferDuration to allow instant swipe
         
         // Preload the asset
         let asset = nextItem.asset
@@ -341,6 +347,7 @@ class SamplesPlayer: NSObject, ObservableObject {
         }
         currentPlayerItem = nil
         nextPlayerItem = nil
+        currentURL = nil
         
         player?.pause()
         player = nil
@@ -376,11 +383,20 @@ class SamplesPlayer: NSObject, ObservableObject {
             }
         } else if keyPath == "status", let item = object as? AVPlayerItem {
             DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
                 if item.status == .readyToPlay {
-                    // Video is ready, start playing if it's a video
-                    if self?.currentShort?.type == "SHORT_VIDEO" {
-                        self?.player?.play()
-                        self?.isPlaying = true
+                    // Check if it's a video or m3u8 audio
+                    let isVideo = self.currentShort?.type == "SHORT_VIDEO"
+                    let isM3U8Audio = !isVideo && self.currentURL != nil && self.isM3U8URL(self.currentURL!)
+                    
+                    if isVideo || isM3U8Audio {
+                        // Video or m3u8 audio is ready, start playing
+                        self.player?.play()
+                        self.isPlaying = true
+                    }
+                } else if item.status == .failed {
+                    if let error = item.error {
+                        print("❌ Playback failed: \(error.localizedDescription)")
                     }
                 }
             }
@@ -561,11 +577,18 @@ struct SamplesView: View {
         guard index >= 0 && index < shorts.count else { return }
         let short = shorts[index]
         
-        // Load short (video will auto-play when ready, audio needs manual play)
+        // Load short
         samplesPlayer.load(short: short)
         
-        // For audio, play immediately. For video, it will play when ready
-        if short.type != "SHORT_VIDEO" {
+        // Check if it's m3u8 audio - if so, it will auto-play when ready (via status observer)
+        let audioUrl = short.audio_url ?? ""
+        let isM3U8Audio = short.type != "SHORT_VIDEO" && 
+                          (audioUrl.lowercased().hasSuffix(".m3u8") || 
+                           audioUrl.lowercased().contains(".m3u8"))
+        
+        // For regular audio (not m3u8), play immediately
+        // For video and m3u8 audio, they will auto-play when ready via status observer
+        if short.type != "SHORT_VIDEO" && !isM3U8Audio {
             samplesPlayer.play()
         }
         

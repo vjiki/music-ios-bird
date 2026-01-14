@@ -474,8 +474,11 @@ struct SamplesView: View {
     @State private var currentIndex: Int = 0
     @State private var lastPlayedIndex: Int = -1
     @State private var scrollPosition: Int? = 0
+    @State private var showComments: Bool = false
+    @State private var selectedShortId: String? = nil
     
     private let songLikesService = SongLikesService()
+    @StateObject private var commentsService = CommentsService()
     
     private var shorts: [ShortsModel] {
         shortsService.shorts
@@ -506,10 +509,14 @@ struct SamplesView: View {
                                         totalShorts: shorts.count,
                                         currentPlayingShortId: samplesPlayer.currentShort?.id,
                                         onLike: { short in
-                                            await self.toggleLike(for: short)
+                                            self.toggleLike(for: short)
                                         },
                                         onDislike: { short in
-                                            await self.toggleDislike(for: short)
+                                            self.toggleDislike(for: short)
+                                        },
+                                        onComment: { short in
+                                            selectedShortId = short.id
+                                            showComments = true
                                         }
                                     )
                                     .environmentObject(songManager)
@@ -558,6 +565,23 @@ struct SamplesView: View {
                     }
                 }
             }
+            .sheet(isPresented: $showComments) {
+                if let shortId = selectedShortId {
+                    CommentsView(
+                        trackId: shortId,
+                        userId: songManager.getCurrentUserId()
+                    )
+                }
+            }
+            .onChange(of: showComments) { oldValue, newValue in
+                if !newValue {
+                    // Reload comments count when sheet is dismissed
+                    Task {
+                        // Find the short card and reload its comments count
+                        // This will be handled by each ShortCard's onAppear
+                    }
+                }
+            }
         }
         .ignoresSafeArea(.all)
         .onAppear {
@@ -597,82 +621,90 @@ struct SamplesView: View {
     }
     
     // MARK: - Like/Dislike Methods
-    func toggleLike(for short: ShortsModel) async {
+    func toggleLike(for short: ShortsModel) {
         let userId = songManager.getCurrentUserId()
         var updatedShort = short
         
-        // Update local state immediately for responsive UI
-        await MainActor.run {
-            if !updatedShort.isLiked {
-                // First like - set as liked and remove dislike
-                updatedShort.isLiked = true
-                updatedShort.isDisliked = false
-                updatedShort.likesCount += 1
-                if updatedShort.dislikesCount > 0 {
-                    updatedShort.dislikesCount -= 1
-                }
-            } else {
-                // Already liked - add another like (multiple likes allowed)
-                updatedShort.likesCount += 1
+        // Update local state immediately for responsive UI (optimistic update)
+        if !updatedShort.isLiked {
+            // First like - set as liked and remove dislike
+            updatedShort.isLiked = true
+            updatedShort.isDisliked = false
+            updatedShort.likesCount += 1
+            if updatedShort.dislikesCount > 0 {
+                updatedShort.dislikesCount -= 1
             }
+        } else {
+            // Already liked - add another like (multiple likes allowed)
+            updatedShort.likesCount += 1
         }
         
-        // Call API - backend handles the like logic
-        do {
-            try await songLikesService.likeSong(userId: userId, songId: short.id)
-            // Update short in service after successful API call
-            await MainActor.run {
-                shortsService.updateShort(updatedShort)
-                // Update current short if it's the one being played
-                if samplesPlayer.currentShort?.id == short.id {
-                    samplesPlayer.currentShort = updatedShort
+        // Update UI immediately
+        shortsService.updateShort(updatedShort)
+        if samplesPlayer.currentShort?.id == short.id {
+            samplesPlayer.currentShort = updatedShort
+        }
+        
+        // Call API in background - don't block UI
+        let shortsService = self.shortsService
+        let samplesPlayer = self.samplesPlayer
+        let songLikesService = self.songLikesService
+        Task.detached {
+            do {
+                try await songLikesService.likeSong(userId: userId, songId: short.id)
+            } catch {
+                print("Failed to like short: \(error.localizedDescription)")
+                // Revert local state on error
+                await MainActor.run {
+                    shortsService.updateShort(short)
+                    if samplesPlayer.currentShort?.id == short.id {
+                        samplesPlayer.currentShort = short
+                    }
                 }
-            }
-        } catch {
-            print("Failed to like short: \(error.localizedDescription)")
-            // Revert local state on error
-            await MainActor.run {
-                shortsService.updateShort(short)
             }
         }
     }
     
-    func toggleDislike(for short: ShortsModel) async {
+    func toggleDislike(for short: ShortsModel) {
         let userId = songManager.getCurrentUserId()
         var updatedShort = short
         
-        // Update local state immediately for responsive UI
-        await MainActor.run {
-            if !updatedShort.isDisliked {
-                // First dislike - set as disliked and remove like
-                updatedShort.isDisliked = true
-                updatedShort.isLiked = false
-                updatedShort.dislikesCount += 1
-                if updatedShort.likesCount > 0 {
-                    updatedShort.likesCount -= 1
-                }
-            } else {
-                // Already disliked - add another dislike (multiple dislikes allowed)
-                updatedShort.dislikesCount += 1
+        // Update local state immediately for responsive UI (optimistic update)
+        if !updatedShort.isDisliked {
+            // First dislike - set as disliked and remove like
+            updatedShort.isDisliked = true
+            updatedShort.isLiked = false
+            updatedShort.dislikesCount += 1
+            if updatedShort.likesCount > 0 {
+                updatedShort.likesCount -= 1
             }
+        } else {
+            // Already disliked - add another dislike (multiple dislikes allowed)
+            updatedShort.dislikesCount += 1
         }
         
-        // Call API - backend handles the dislike logic
-        do {
-            try await songLikesService.dislikeSong(userId: userId, songId: short.id)
-            // Update short in service after successful API call
-            await MainActor.run {
-                shortsService.updateShort(updatedShort)
-                // Update current short if it's the one being played
-                if samplesPlayer.currentShort?.id == short.id {
-                    samplesPlayer.currentShort = updatedShort
+        // Update UI immediately
+        shortsService.updateShort(updatedShort)
+        if samplesPlayer.currentShort?.id == short.id {
+            samplesPlayer.currentShort = updatedShort
+        }
+        
+        // Call API in background - don't block UI
+        let shortsService = self.shortsService
+        let samplesPlayer = self.samplesPlayer
+        let songLikesService = self.songLikesService
+        Task.detached {
+            do {
+                try await songLikesService.dislikeSong(userId: userId, songId: short.id)
+            } catch {
+                print("Failed to dislike short: \(error.localizedDescription)")
+                // Revert local state on error
+                await MainActor.run {
+                    shortsService.updateShort(short)
+                    if samplesPlayer.currentShort?.id == short.id {
+                        samplesPlayer.currentShort = short
+                    }
                 }
-            }
-        } catch {
-            print("Failed to dislike short: \(error.localizedDescription)")
-            // Revert local state on error
-            await MainActor.run {
-                shortsService.updateShort(short)
             }
         }
     }
@@ -684,11 +716,14 @@ struct ShortCard: View {
     @Binding var currentIndex: Int
     let totalShorts: Int
     let currentPlayingShortId: String?
-    let onLike: (ShortsModel) async -> Void
-    let onDislike: (ShortsModel) async -> Void
+    let onLike: (ShortsModel) -> Void
+    let onDislike: (ShortsModel) -> Void
+    let onComment: (ShortsModel) -> Void
     
     @EnvironmentObject var songManager: SongManager
     @EnvironmentObject var samplesPlayer: SamplesPlayer
+    @StateObject private var commentsService = CommentsService()
+    @State private var commentsCount: Int = 0
     
     // Get the short to display - prioritize currently playing short if this card matches it
     private var displayShort: ShortsModel {
@@ -840,9 +875,7 @@ struct ShortCard: View {
                         let buttonShort = displayShort
                         VStack(spacing: 8) {
                             Button {
-                                Task {
-                                    await onLike(buttonShort)
-                                }
+                                onLike(buttonShort)
                             } label: {
                                 Image(systemName: buttonShort.isLiked ? "heart.fill" : "heart")
                                     .font(.system(size: songManager.iconSize(for: buttonShort.likesCount, baseSize: 28), weight: .medium))
@@ -861,9 +894,7 @@ struct ShortCard: View {
                         // Dislike button
                         VStack(spacing: 8) {
                             Button {
-                                Task {
-                                    await onDislike(buttonShort)
-                                }
+                                onDislike(buttonShort)
                             } label: {
                                 Image(systemName: buttonShort.isDisliked ? "heart.slash.fill" : "heart.slash")
                                     .font(.system(size: songManager.iconSize(for: buttonShort.dislikesCount, baseSize: 28), weight: .medium))
@@ -882,7 +913,7 @@ struct ShortCard: View {
                         // Comment button
                         VStack(spacing: 8) {
                             Button {
-                                // Comment action
+                                onComment(buttonShort)
                             } label: {
                                 Image(systemName: "bubble.right")
                                     .font(.system(size: 28, weight: .medium))
@@ -891,8 +922,9 @@ struct ShortCard: View {
                                     .background(Color.black.opacity(0.15))
                                     .clipShape(Circle())
                             }
+                            .buttonStyle(ScaleButtonStyle())
                             
-                            Text("0")
+                            Text("\(commentsCount)")
                                 .font(.caption)
                                 .foregroundStyle(.white)
                         }
@@ -903,6 +935,34 @@ struct ShortCard: View {
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
+            .task {
+                await loadCommentsCount()
+            }
+            .onChange(of: displayShort.id) { oldValue, newValue in
+                if oldValue != newValue {
+                    Task {
+                        await loadCommentsCount()
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Load Comments Count
+    private func loadCommentsCount() async {
+        do {
+            let comments = try await commentsService.fetchComments(trackId: displayShort.id)
+            await MainActor.run {
+                // Count all comments including replies
+                commentsCount = comments.reduce(0) { total, comment in
+                    total + 1 + comment.replies.count
+                }
+            }
+        } catch {
+            print("Failed to load comments count: \(error.localizedDescription)")
+            await MainActor.run {
+                commentsCount = 0
+            }
         }
     }
 }

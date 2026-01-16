@@ -119,44 +119,49 @@ struct MessagesView: View {
                 showChatView = true
             }
         } else {
-            // Create a new chat response for the follower
-            var participants: [ChatParticipant] = [
-                ChatParticipant(
-                    userId: follower.followerId,
-                    userNickname: follower.followerNickname,
-                    userAvatarUrl: follower.followerAvatarUrl
+            // Create a new chat via API
+            do {
+                let request = CreateChatRequest(
+                    type: "DIRECT",
+                    title: nil,
+                    description: nil,
+                    avatarUrl: nil,
+                    ownerId: nil,
+                    participantIds: [currentUserId, follower.followerId],
+                    isEncrypted: false
                 )
-            ]
-            
-            // Add current user to participants
-            if let currentUser = authService.currentUser {
-                participants.append(
-                    ChatParticipant(
-                        userId: currentUser.id,
-                        userNickname: currentUser.nickname ?? currentUser.name ?? "You",
-                        userAvatarUrl: currentUser.avatarUrl
-                    )
+                
+                let chatDetail = try await messagesService.createChat(request)
+                
+                // Convert ChatDetailResponse to ChatResponse
+                let newChat = ChatResponse(
+                    chatId: chatDetail.id,
+                    chatType: chatDetail.type,
+                    title: chatDetail.title ?? "Direct Chat",
+                    avatarUrl: chatDetail.avatarUrl,
+                    lastMessagePreview: nil,
+                    lastMessageAt: nil,
+                    lastMessageSenderId: nil,
+                    lastMessageSenderName: nil,
+                    unreadCount: 0,
+                    isMuted: chatDetail.isMuted,
+                    updatedAt: chatDetail.updatedAt,
+                    participants: chatDetail.participants.map { participant in
+                        ChatParticipant(
+                            userId: participant.userId,
+                            userNickname: participant.userNickname,
+                            userAvatarUrl: participant.userAvatarUrl
+                        )
+                    }
                 )
-            }
-            
-            let newChat = ChatResponse(
-                chatId: UUID().uuidString, // Temporary ID, will be replaced by API
-                chatType: "DIRECT",
-                title: follower.followerNickname,
-                avatarUrl: follower.followerAvatarUrl,
-                lastMessagePreview: nil,
-                lastMessageAt: nil,
-                lastMessageSenderId: nil,
-                lastMessageSenderName: nil,
-                unreadCount: 0,
-                isMuted: false,
-                updatedAt: ISO8601DateFormatter().string(from: Date()),
-                participants: participants
-            )
-            
-            await MainActor.run {
-                selectedChat = newChat
-                showChatView = true
+                
+                await MainActor.run {
+                    chats.insert(newChat, at: 0)
+                    selectedChat = newChat
+                    showChatView = true
+                }
+            } catch {
+                print("Failed to create chat: \(error.localizedDescription)")
             }
         }
     }
